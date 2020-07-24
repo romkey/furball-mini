@@ -1,87 +1,107 @@
+#include "furball.h"
+
 #include <Arduino.h>
+#include <time.h>
 
 #include "config.h"
 #include "hw.h"
 
-#include <multiball/wifi.h>
 #include <multiball/app.h>
-#include <multiball/mqtt.h>
+#include <multiball/wifi.h>
 #include <multiball/homebus.h>
 
-#include <multiball/uptime.h>
-
+#ifdef USE_DIAGNOSTICS
+#include <diagnostics.h>
+#endif
 
 #include "sensors/bme280_sensor.h"
+#include "sensors/bme680_sensor.h"
 #include "sensors/tsl2561_sensor.h"
 
-static Uptime uptime;
-
 static BME280_Sensor bme280(UPDATE_DELAY, 0, 0, false);
+static BME680_Sensor bme680(UPDATE_DELAY, 0, 0, false);
 static TSL2561_Sensor tsl2561(UPDATE_DELAY, 0, 0, false);
-
-extern MultiballApp App;
 
 void furball_setup() {
   bme280.begin();
-  Serial.println("[bme280]");
+  if(bme280.is_present())
+    Serial.println("[bme280]");
+
+  bme680.begin();
+  if(bme680.is_present())
+    Serial.println("[bme680]");
 
   tsl2561.begin();
   Serial.println("[tsl2561]");
 }
 
 static boolean furball_air_update(char* buf, size_t buf_len) {
-  float temperature = 0, humidity = 0, pressure = 0;
-
-  bme280.handle();
-  temperature = bme280.temperature();
-  humidity = bme280.humidity();
-  pressure = bme280.pressure();
-
+  if(bme280.is_present()) {
+    snprintf(buf,
+	     buf_len,
+	     "{ \"temperature\": %.1f, \"humidity\": %.1f, \"pressure\": %.1f }",
 #ifdef TEMPERATURE_ADJUSTMENT
-  temperature += TEMPERATURE_ADJUSTMENT;
+	     bme280.temperature() + TEMPERATURE_ADJUSTMENT,
+#else
+	     bme280.temperature(),
 #endif
+	     bme280.humidity(), bme280.pressure());
 
-  snprintf(buf,
-	   buf_len,
-	   "{ \"id\": \"%s\", \"org.homebus.experimental.air-sensor\": { \"temperature\": %.1f, \"humidity\": %.1f, \"pressure\": %.1f } }",
-	   homebus_uuid(),
-	   temperature, humidity, pressure);
+#ifdef VERBOSE
+    Serial.println(buf);
+#endif
+    return true;
+  }
 
-  return true;
+
+  if(bme680.is_present()) {
+    snprintf(buf,
+	     buf_len,
+	     "{ \"temperature\": %.1f, \"humidity\": %.1f, \"pressure\": %.1f }",
+#ifdef TEMPERATURE_ADJUSTMENT
+	     bme680.temperature() + TEMPERATURE_ADJUSTMENT,
+#else
+	     bme680.temperature(),
+#endif
+	     bme680.humidity(), bme680.pressure());
+
+#ifdef VERBOSE
+    Serial.println(buf);
+#endif
+    return true;
+  }
+
+  return false;
 }
 
-#if 0
 static boolean furball_air_quality_update(char* buf, size_t buf_len) {
-
-  uint16_t pm1 = pms5003.density_1_0();
-  uint16_t pm25 = pms5003.density_2_5();
-  uint16_t pm10 = pms5003.density_10_0();
-
-  if(pm1 > 10000 && uptime.uptime() < 60*1000)
-    pm1 = 0;
-
-  if(pm25 > 10000 && uptime.uptime() < 60*1000)
-    pm25 = 0;
-
-  if(pm10 > 10000 && uptime.uptime() < 60*1000)
-    pm10 = 0;
+  if(!bme680.is_present())
+    return false;
 
   snprintf(buf,
 	   buf_len,
-	   "{ \"id\": \"%s\", \"org.homebus.experimental.air-quality-sensor\": {  \"tvoc\": %0.2f, \"pm1\": %d, \"pm25\": %d, \"pm10\": %d } }",
-	   homebus_uuid(),
-	   bme680.gas_resistance(), pm1, pm25, pm10);
+	   "{ \"tvoc\": %0.2f, \"pm1\": null, \"pm25\": null, \"pm10\": null }",
+	   bme680.gas_resistance());
+
+#ifdef VERBOSE
+  Serial.println(buf);
+#endif
 
   return true;
 }
-#endif
 
 static boolean furball_light_update(char* buf, size_t buf_len) {
+  if(!tsl2561.is_present())
+    return false;
+
   snprintf(buf,
 	   buf_len,
-	   "{ \"id\": \"%s\", \"org.homebus.experimental.light-sensor\": {  \"lux\": %d, \"full_light\": %d, \"ir\": %d, \"visible\": %d } }",
-	   homebus_uuid(),
+	   "{  \"lux\": %d, \"full_light\": %d, \"ir\": %d, \"visible\": %d }",
 	   tsl2561.lux(), tsl2561.full(), tsl2561.ir(), tsl2561.visible());
+
+#ifdef VERBOSE
+  Serial.println(buf);
+#endif
 
   return true;
 }
@@ -99,18 +119,24 @@ static boolean furball_system_update(char* buf, size_t buf_len) {
 
   snprintf(buf,
 	   buf_len,
-	   "{ \"id\": \"%s\", \"org.homebus.experimental.furball-system\": { \"name\": \"%s\", \"build\": \"%s\", \"ip\": \"%d.%d.%d.%d\", \"mac_addr\": \"%s\" } }",
-	   homebus_uuid(),
-	   App.hostname().c_str(), App.build_info().c_str(), local[0], local[1], local[2], local[3], mac_address.c_str()
+	   "{ \"name\": \"%s\", \"platform\": \"%s\", \"build\": \"%s\", \"ip\": \"%d.%d.%d.%d\", \"mac_addr\": \"%s\" }",
+	   App.hostname().c_str(), "furball-mini", App.build_info().c_str(), local[0], local[1], local[2], local[3], mac_address.c_str()
 	   );
+
+#ifdef VERBOSE
+  Serial.println(buf);
+#endif
 
   return true;
 }
 
 static boolean furball_diagnostic_update(char* buf, size_t buf_len) {
-  snprintf(buf, buf_len, "{ \"id\": \"%s\", \"org.homebus.experimental.furball-diagnostic\": { \"freeheap\": %d, \"uptime\": %lu, \"rssi\": %d, \"reboots\": %d, \"wifi_failures\": %d } }",
-	   homebus_uuid(),
-	   ESP.getFreeHeap(), uptime.uptime()/1000, WiFi.RSSI(), App.boot_count(), App.wifi_failures());
+  snprintf(buf, buf_len, "{ \"freeheap\": %d, \"uptime\": %lu, \"rssi\": %d, \"reboots\": %d, \"wifi_failures\": %d }",
+	   ESP.getFreeHeap(), App.uptime()/1000, WiFi.RSSI(), App.boot_count(), App.wifi_failures());
+
+#ifdef VERBOSE
+  Serial.println(buf);
+#endif
 
   return true;
 }
@@ -119,58 +145,70 @@ static boolean furball_diagnostic_update(char* buf, size_t buf_len) {
 void furball_loop() {
   static unsigned long next_loop = 0;
 
-  bme280.handle();
-  tsl2561.handle();
-
   if(next_loop > millis())
     return;
 
-  if(bme280.ready_for_update()) {
-#ifdef VERBOSE
-    Serial.printf("Temperature %d\n", bme280.temperature());
-    Serial.printf("Pressure %d\n", bme280.pressure());
-    Serial.printf("Humidity %d\n", bme280.humidity());
-#endif
-  }
-
-  if(tsl2561.ready_for_update()) {
-#ifdef VERBOSE
-    Serial.printf("IR %d\n", tsl2561.ir());
-    Serial.printf("Visible %d\n", tsl2561.visible());
-    Serial.printf("Full %d\n", tsl2561.full());
-    Serial.printf("Lux %d\n", tsl2561.lux());
-#endif
-  }
-
   next_loop = millis() + UPDATE_DELAY;
 
-#ifdef VERBOSE
-  Serial.printf("Uptime %.2f seconds\n", uptime.uptime() / 1000.0);
-  Serial.printf("Free heap %u bytes\n", ESP.getFreeHeap());
-  Serial.printf("Wifi RSSI %d\n", WiFi.RSSI());
-#endif
+  bme280.handle();
+  bme680.handle();
+  tsl2561.handle();
 
-#define BUFFER_LEN 600
-  char buffer[BUFFER_LEN];
+  #define BUFFER_LENGTH 700
+  char buffer[BUFFER_LENGTH + 1];
 
-  if(furball_air_update(buffer, BUFFER_LEN)) {
-    Serial.println(buffer);
+  if(furball_air_update(buffer, BUFFER_LENGTH))
     homebus_publish_to("org.homebus.experimental.air-sensor", buffer);
-  }
 
-  if(furball_light_update(buffer, BUFFER_LEN)) {
-    Serial.println(buffer);
+  if(furball_air_quality_update(buffer, BUFFER_LENGTH))
+    homebus_publish_to("org.homebus.experimental.air-quality-sensor", buffer);
+
+  if(furball_light_update(buffer, BUFFER_LENGTH))
     homebus_publish_to("org.homebus.experimental.light-sensor", buffer);
-  }
 
-  if(furball_system_update(buffer, BUFFER_LEN)) {
-    Serial.println(buffer);
-    homebus_publish_to("org.homebus.experimental.furball-system", buffer);
-  }
+  if(furball_system_update(buffer, BUFFER_LENGTH))
+    homebus_publish_to("org.homebus.experimental.system", buffer);
 
-  if(furball_diagnostic_update(buffer, BUFFER_LEN)) {
-    Serial.println(buffer);
-    homebus_publish_to("org.homebus.experimental.furball-diagnostic", buffer);
-  }
-
+  if(furball_diagnostic_update(buffer, BUFFER_LENGTH))
+    homebus_publish_to("org.homebus.experimental.diagnostic", buffer);
 }
+
+/* 
+ * this callback is used to stream sensor data for diagnostics
+ */
+#ifdef USE_DIAGNOSTICS
+void furball_stream() {
+  static uint8_t count = 0;
+
+  if(count == 0)
+    Serial.println("TEMP PRES HUMD TVOC   IR VISB FULL  LUX  1.0  2.5 10.0");
+
+  if(++count == 10)
+    count = 0;
+
+  bme680.handle();
+  tsl2561.handle();
+  pms5003.handle();
+  sound_level.handle();
+
+  Serial.printf( "%03.1f %4.0f %4.0f %4.0f %4d %4d %4d %4d %4d %4d %4d\n";
+		 bme680.temperature(),
+		 bme680.pressure(),
+		 bme680.humidity(),
+		 bme680.gas_resistance(),
+		 tsl2561.ir(),
+		 tsl2561.visible(),
+		 tsl2561.full(),
+		 tsl2561.lux(),
+		 pms5003.density_1_0(),
+		 pms5003.density_2_5(),
+		 pms5003.density_10_0());
+
+  if(0) {
+  Serial.println("[system]");
+  Serial.printf("  Uptime %.2f seconds\n", App.uptime() / 1000.0);
+  Serial.printf("  Free heap %u bytes\n", ESP.getFreeHeap());
+  Serial.printf("  Wifi RSSI %d\n", WiFi.RSSI());
+  }
+}
+#endif

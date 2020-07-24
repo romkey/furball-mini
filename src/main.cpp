@@ -22,7 +22,7 @@ void setup() {
   delay(500);
 
   App.wifi_credentials(3, wifi_credentials);
-  App.begin();
+  App.begin("furball-mini");
   Serial.println("[app]");
 
   homebus_configure("furball-mini", "", "Homebus", "v4");
